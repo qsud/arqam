@@ -14,8 +14,6 @@ import asyncio
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import pytz
 
-from keep_alive import keep_alive
-keep_alive()
 loop = asyncio.get_event_loop()
 
 TOKEN = '7938475169:AAEd9HR1rn3MIIrgpiw4apxk_YbHRJTq_a4'
