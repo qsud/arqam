@@ -17,16 +17,12 @@ import pytz
 loop = asyncio.get_event_loop()
 
 TOKEN = '7938475169:AAEd9HR1rn3MIIrgpiw4apxk_YbHRJTq_a4'
-MONGO_URI = 'mongodb+srv://ijsmaeuv:sopore45@cluster0.pqzba.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0'
+USER_DATA_FILE = "user_data.json"
 FORWARD_CHANNEL_ID = -1002166347748
 CHANNEL_ID = -1002166347748
 error_channel_id = -1002166347748
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-
-client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
-db = client['arqambgmi']
-users_collection = db.users
 
 bot = telebot.TeleBot(TOKEN)
 REQUEST_INTERVAL = 1
@@ -42,19 +38,39 @@ ongoing_attacks = {}
 # Time zone setup
 tz = pytz.timezone('Asia/Kolkata')
 
+if not os.path.exists(USER_DATA_FILE):
+    with open(USER_DATA_FILE, "w") as file:
+        json.dump([], file)
+
+def load_users():
+    """Load users from the JSON file."""
+    with open(USER_DATA_FILE, "r") as file:
+        return json.load(file)
+
+def save_users(users):
+    """Save users to the JSON file."""
+    with open(USER_DATA_FILE, "w") as file:
+        json.dump(users, file, indent=4)
+
+def get_user(user_id):
+    """Retrieve a user by ID."""
+    users = load_users()
+    return next((user for user in users if user["user_id"] == user_id), None)
+    
+    
 def extend_and_clean_expired_users():
     """Clean up users whose access has expired."""
     now = datetime.now(tz)
     logging.info(f"Current Date and Time: {now}")
 
-    users_cursor = users_collection.find()
-    for user in users_cursor:
+    users = load_users()
+    updated_users = []
+
+    for user in users:
         user_id = user.get("user_id")
         username = user.get("username", "Unknown User")
-        time_add_str = user.get("time_add")
-        days = user.get("days", 0)
         valid_until_str = user.get("valid_until", "")
-        approving_admin_id = user.get("add_by")
+        time_add_str = user.get("time_add")
 
         if valid_until_str:
             try:
@@ -74,27 +90,14 @@ def extend_and_clean_expired_users():
                             f"If you believe this is a mistake or wish to renew your access, please contact support. 💬",
                             reply_markup=create_inline_keyboard(), parse_mode='Markdown'
                         )
-
-                        if approving_admin_id:
-                            bot.send_message(
-                                approving_admin_id,
-                                f"*🔴 User {username} (ID: {user_id}) has been automatically removed due to expired access.*\n"
-                                f"🕒 Approval Time: {time_add_str if time_add_str else 'N/A'}\n"
-                                f"📅 Valid Until: {valid_until_datetime.strftime('%Y-%m-%d %I:%M:%S %p')}\n"
-                                f"🚫 Status: Removed*",
-                                reply_markup=create_inline_keyboard(), parse_mode='Markdown'
-                            )
                     except Exception as e:
                         logging.error(f"Failed to send message for user {user_id}: {e}")
-
-                    result = users_collection.delete_one({"user_id": user_id})
-                    if result.deleted_count > 0:
-                        logging.info(f"User {user_id} has been removed from the database. 🗑️")
-                    else:
-                        logging.warning(f"Failed to remove user {user_id} from the database. ⚠️")
+                else:
+                    updated_users.append(user)
             except ValueError as e:
                 logging.error(f"Failed to parse date for user {user_id}: {e}")
 
+    save_users(updated_users)
     logging.info("Approval times extension and cleanup completed. ✅")
 
 def log_command(user_id, target, port, time):
@@ -283,7 +286,7 @@ def list_approved_users(message):
 def add_or_remove_user(message):
     user_id = message.from_user.id
     chat_id = message.chat.id
-    is_admin = is_user_admin(user_id, CHANNEL_ID)
+    is_admin = user_id == int(ADMIN_ID)
     cmd_parts = message.text.split()
 
     if not is_admin:
@@ -321,25 +324,37 @@ def add_or_remove_user(message):
 
     target_username = message.reply_to_message.from_user.username if message.reply_to_message else None
 
-    try:
-        plan = int(cmd_parts[2]) if len(cmd_parts) >= 3 else 0
-        days = int(cmd_parts[3]) if len(cmd_parts) >= 4 else 0
-    except ValueError:
-        bot.send_message(chat_id,
-                         "⚠️ *Error: <plan> and <days> must be integers!*\n"
-                         "🔢 *Ensure that the plan and days are numerical values and try again.*",
-                         reply_markup=create_inline_keyboard(), parse_mode='Markdown')
-        return
-
-    now = datetime.now(tz).date()
-
     if action == '/add':
-        valid_until = (
-            now +
-            timedelta(days=days)).isoformat() if days > 0 else now.isoformat()
+        try:
+            plan = int(cmd_parts[2]) if len(cmd_parts) >= 3 else 0
+            days = int(cmd_parts[3]) if len(cmd_parts) >= 4 else 0
+        except ValueError:
+            bot.send_message(chat_id,
+                             "⚠️ *Error: <plan> and <days> must be integers!*\n"
+                             "🔢 *Ensure that the plan and days are numerical values and try again.*",
+                             reply_markup=create_inline_keyboard(), parse_mode='Markdown')
+            return
+
+        # Adding user to JSON file
+        users = load_users()
+        now = datetime.now(tz).date()
+        valid_until = (now + timedelta(days=days)).isoformat() if days > 0 else now.isoformat()
         time_add = datetime.now(tz).strftime("%I:%M:%S %p %Y-%m-%d")
-        users_collection.update_one({"user_id": target_user_id}, {
-            "$set": {
+
+        # Check if user already exists
+        user = next((u for u in users if u["user_id"] == target_user_id), None)
+        if user:
+            user.update({
+                "username": target_username,
+                "plan": plan,
+                "days": days,
+                "valid_until": valid_until,
+                "add_by": user_id,
+                "time_add": time_add,
+                "access_count": 0
+            })
+        else:
+            users.append({
                 "user_id": target_user_id,
                 "username": target_username,
                 "plan": plan,
@@ -348,11 +363,10 @@ def add_or_remove_user(message):
                 "add_by": user_id,
                 "time_add": time_add,
                 "access_count": 0
-            }
-        },
-                                    upsert=True)
+            })
 
-        # Message to the approving admin
+        save_users(users)
+
         bot.send_message(
             chat_id,
             f"✅ *Approval Successful!*\n"
@@ -363,29 +377,12 @@ def add_or_remove_user(message):
             f"🚀 *They will be able to use the bot's commands according to their plan.*",
             reply_markup=create_inline_keyboard(), parse_mode='Markdown')
 
-        # Message to the target user
-        bot.send_message(
-            target_user_id,
-            f"🎉 *Congratulations, {target_user_id}!*\n"
-            f"✅ *Your account has been activated!*\n"
-            f"📋 *Plan:* `{plan}`\n"
-            f"⏳ *Valid for:* `{days} days`\n"
-            f"🔥 *You can now use the /attack command.*\n"
-            f"💡 *Thank you for choosing our service!*",
-            reply_markup=create_inline_keyboard(), parse_mode='Markdown')
-
-        # Message to the channel
-        bot.send_message(
-            CHANNEL_ID,
-            f"🔔 *Notification:*\n"
-            f"👤 *User ID:* `{target_user_id}`\n"
-            f"💬 *Username:* `@{target_username}`\n"
-            f"👮 *Has been added by Admin:* `{user_id}`\n"
-            f"🎯 *The user is now authorized to access the bot.*",
-            reply_markup=create_inline_keyboard(), parse_mode='Markdown')
-
     elif action == '/remove':
-        users_collection.delete_one({"user_id": target_user_id})
+        # Removing user from JSON file
+        users = load_users()
+        users = [u for u in users if u["user_id"] != target_user_id]
+        save_users(users)
+
         bot.send_message(
             chat_id,
             f"❌ *Disapproval Successful!*\n"
@@ -394,20 +391,10 @@ def add_or_remove_user(message):
             f"🚫 *They will no longer be able to access the bot.*",
             reply_markup=create_inline_keyboard(), parse_mode='Markdown')
 
-        # Message to the target user
         bot.send_message(
             target_user_id,
             "🚫 *Your account has been removed and deleted.*\n"
             "💬 *If you believe this is a mistake, please contact the admin.*",
-            reply_markup=create_inline_keyboard(), parse_mode='Markdown')
-
-        # Message to the channel
-        bot.send_message(
-            CHANNEL_ID,
-            f"🔕 *Notification:*\n"
-            f"👤 *User ID:* `{target_user_id}`\n"
-            f"👮 *Has been removed by Admin:* `{user_id}`\n"
-            f"🗑️ *The user has been removed from the system.*",
             reply_markup=create_inline_keyboard(), parse_mode='Markdown')
 
 @bot.message_handler(commands=['broadcast'])
